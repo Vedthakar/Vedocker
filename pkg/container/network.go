@@ -12,6 +12,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const publishedContainerIP = "10.200.1.2"
+
 type ifreqFlags struct {
 	Name  [unix.IFNAMSIZ]byte
 	Flags uint16
@@ -132,51 +134,152 @@ func setupPublishedPorts(ports []Port) (func(), error) {
 		return func() {}, nil
 	}
 
-	var cleanups []func()
+	if err := cleanupPublishedPortRules(ports); err != nil {
+		return nil, err
+	}
 
 	for _, p := range ports {
-		cleanup, err := setupSinglePublishedPort(p)
-		if err != nil {
-			for i := len(cleanups) - 1; i >= 0; i-- {
-				cleanups[i]()
-			}
+		if err := addSinglePublishedPortRule(p); err != nil {
+			_ = cleanupPublishedPortRules(ports)
 			return nil, err
 		}
-		cleanups = append(cleanups, cleanup)
 	}
 
 	return func() {
-		for i := len(cleanups) - 1; i >= 0; i-- {
-			cleanups[i]()
-		}
+		_ = cleanupPublishedPortRules(ports)
 	}, nil
 }
 
-func setupSinglePublishedPort(p Port) (func(), error) {
+func addSinglePublishedPortRule(p Port) error {
 	hostPort := strconv.Itoa(p.HostPort)
-	containerDest := fmt.Sprintf("10.200.1.2:%d", p.ContainerPort)
+	containerDest := fmt.Sprintf("%s:%d", publishedContainerIP, p.ContainerPort)
 	containerPort := strconv.Itoa(p.ContainerPort)
 
 	if err := runIPTables("-t", "nat", "-A", "PREROUTING", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest); err != nil {
-		return nil, err
+		return err
 	}
 	if err := runIPTables("-t", "nat", "-A", "OUTPUT", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest); err != nil {
 		_ = runIPTables("-t", "nat", "-D", "PREROUTING", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest)
-		return nil, err
+		return err
 	}
-	if err := runIPTables("-A", "FORWARD", "-p", "tcp", "-d", "10.200.1.2", "--dport", containerPort, "-j", "ACCEPT"); err != nil {
+	if err := runIPTables("-A", "FORWARD", "-p", "tcp", "-d", publishedContainerIP, "--dport", containerPort, "-j", "ACCEPT"); err != nil {
 		_ = runIPTables("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest)
 		_ = runIPTables("-t", "nat", "-D", "PREROUTING", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest)
-		return nil, err
+		return err
 	}
 
-	cleanup := func() {
-		_ = runIPTables("-D", "FORWARD", "-p", "tcp", "-d", "10.200.1.2", "--dport", containerPort, "-j", "ACCEPT")
-		_ = runIPTables("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest)
-		_ = runIPTables("-t", "nat", "-D", "PREROUTING", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest)
+	return nil
+}
+
+func cleanupPublishedPortRules(ports []Port) error {
+	hostPorts := make(map[int]struct{})
+	for _, p := range ports {
+		hostPorts[p.HostPort] = struct{}{}
 	}
 
-	return cleanup, nil
+	for hostPort := range hostPorts {
+		if err := cleanupDNATRulesForHostPort(hostPort); err != nil {
+			return err
+		}
+	}
+
+	if err := cleanupForwardRulesForPublishedContainer(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func cleanupDNATRulesForHostPort(hostPort int) error {
+	match := fmt.Sprintf("--dport %d", hostPort)
+
+	if err := deleteRulesMatching("nat", "PREROUTING", func(line string) bool {
+		return strings.HasPrefix(line, "-A PREROUTING ") &&
+			strings.Contains(line, "-p tcp") &&
+			strings.Contains(line, match) &&
+			strings.Contains(line, "-j DNAT") &&
+			strings.Contains(line, "--to-destination "+publishedContainerIP+":")
+	}); err != nil {
+		return err
+	}
+
+	if err := deleteRulesMatching("nat", "OUTPUT", func(line string) bool {
+		return strings.HasPrefix(line, "-A OUTPUT ") &&
+			strings.Contains(line, "-p tcp") &&
+			strings.Contains(line, match) &&
+			strings.Contains(line, "-j DNAT") &&
+			strings.Contains(line, "--to-destination "+publishedContainerIP+":")
+	}); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func cleanupForwardRulesForPublishedContainer() error {
+	return deleteRulesMatching("", "FORWARD", func(line string) bool {
+		return strings.HasPrefix(line, "-A FORWARD ") &&
+			strings.Contains(line, "-p tcp") &&
+			strings.Contains(line, "-d "+publishedContainerIP) &&
+			strings.Contains(line, "-j ACCEPT")
+	})
+}
+
+func deleteRulesMatching(table, chain string, match func(string) bool) error {
+	lines, err := listIPTablesRules(table, chain)
+	if err != nil {
+		return err
+	}
+
+	for _, line := range lines {
+		if !match(line) {
+			continue
+		}
+		if err := deleteRuleFromLine(table, line); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func listIPTablesRules(table, chain string) ([]string, error) {
+	args := []string{}
+	if table != "" {
+		args = append(args, "-t", table)
+	}
+	args = append(args, "-S", chain)
+
+	cmd := exec.Command("iptables", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			return nil, fmt.Errorf("iptables %s: %w", strings.Join(args, " "), err)
+		}
+		return nil, fmt.Errorf("iptables %s: %s", strings.Join(args, " "), msg)
+	}
+
+	raw := strings.TrimSpace(string(out))
+	if raw == "" {
+		return nil, nil
+	}
+	return strings.Split(raw, "\n"), nil
+}
+
+func deleteRuleFromLine(table, line string) error {
+	if !strings.HasPrefix(line, "-A ") {
+		return nil
+	}
+
+	rule := strings.Replace(line, "-A ", "-D ", 1)
+	args := []string{}
+	if table != "" {
+		args = append(args, "-t", table)
+	}
+	args = append(args, strings.Fields(rule)...)
+
+	return runIPTables(args...)
 }
 
 func detectDefaultRouteInterface() (string, error) {

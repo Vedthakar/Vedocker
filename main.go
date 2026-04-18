@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/vthecar/minicontainer/pkg/container"
 )
@@ -64,6 +66,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "exec-stage2 error: %v\n", err)
 			os.Exit(1)
 		}
+	case "image":
+		if err := imageCmd(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "image error: %v\n", err)
+			os.Exit(1)
+		}
 	case "help", "-h", "--help":
 		help()
 	default:
@@ -79,10 +86,14 @@ func run(args []string) error {
 		return err
 	}
 	if len(rest) < 2 {
-		return fmt.Errorf("usage: minicontainer run [-e KEY=value]... [-v /host:/container]... [-p HOST_PORT:CONTAINER_PORT]... <rootfs> <command> [args...]")
+		return fmt.Errorf("usage: minicontainer run [-e KEY=value]... [-v /host:/container]... [-p HOST_PORT:CONTAINER_PORT]... <rootfs-or-image> <command> [args...]")
 	}
 
-	rootfs := rest[0]
+	rootfs, err := container.ResolveRootfs(rest[0])
+	if err != nil {
+		return err
+	}
+
 	cmd := rest[1:]
 	return container.Run(rootfs, cmd, opts.Env, opts.Mounts, opts.Ports)
 }
@@ -99,7 +110,7 @@ func child(args []string) error {
 
 func create(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: minicontainer create <id> [-e KEY=value]... [-v /host:/container]... [-p HOST_PORT:CONTAINER_PORT]... <rootfs> <command> [args...]")
+		return fmt.Errorf("usage: minicontainer create <id> [-e KEY=value]... [-v /host:/container]... [-p HOST_PORT:CONTAINER_PORT]... <rootfs-or-image> <command> [args...]")
 	}
 
 	id := args[0]
@@ -108,10 +119,14 @@ func create(args []string) error {
 		return err
 	}
 	if len(rest) < 2 {
-		return fmt.Errorf("usage: minicontainer create <id> [-e KEY=value]... [-v /host:/container]... [-p HOST_PORT:CONTAINER_PORT]... <rootfs> <command> [args...]")
+		return fmt.Errorf("usage: minicontainer create <id> [-e KEY=value]... [-v /host:/container]... [-p HOST_PORT:CONTAINER_PORT]... <rootfs-or-image> <command> [args...]")
 	}
 
-	rootfs := rest[0]
+	rootfs, err := container.ResolveRootfs(rest[0])
+	if err != nil {
+		return err
+	}
+
 	cmd := rest[1:]
 	return container.Create(id, rootfs, cmd, opts.Env, opts.Mounts, opts.Ports)
 }
@@ -183,6 +198,113 @@ func execStage2(args []string) error {
 	return container.ExecStage2(rootfs, cmd)
 }
 
+func imageCmd(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: minicontainer image <add|ls|inspect|rm|import|export|pull|build> ...")
+	}
+
+	switch args[0] {
+	case "add":
+		if len(args) != 3 {
+			return fmt.Errorf("usage: minicontainer image add <name[:tag]> <rootfs-path>")
+		}
+		return container.AddImage(args[1], args[2])
+	case "ls":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: minicontainer image ls")
+		}
+
+		images, err := container.ListImages()
+		if err != nil {
+			return err
+		}
+
+		for _, img := range images {
+			fmt.Printf("%s\t%s\t%s\t%s\n", img.Ref, img.Source, img.Rootfs, img.CreatedAt)
+		}
+		return nil
+	case "inspect":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: minicontainer image inspect <name[:tag]>")
+		}
+
+		img, err := container.GetImage(args[1])
+		if err != nil {
+			return err
+		}
+
+		data, err := json.MarshalIndent(img, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+		return nil
+	case "rm":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: minicontainer image rm <name[:tag]>")
+		}
+		return container.RemoveImage(args[1])
+	case "import":
+		if len(args) != 3 {
+			return fmt.Errorf("usage: minicontainer image import <name[:tag]> <rootfs-tar-path>")
+		}
+		return container.ImportImage(args[1], args[2])
+	case "export":
+		if len(args) != 3 {
+			return fmt.Errorf("usage: minicontainer image export <name[:tag]> <output-tar-path>")
+		}
+		return container.ExportImage(args[1], args[2])
+	case "pull":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: minicontainer image pull <name[:tag]>")
+		}
+		return container.PullImage(args[1])
+	case "build":
+		return imageBuildCmd(args[1:])
+	default:
+		return fmt.Errorf("unknown image subcommand: %s", args[0])
+	}
+}
+
+func imageBuildCmd(args []string) error {
+	var tag string
+	var dockerfile string
+	var context string
+
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "-t":
+			if i+1 >= len(args) {
+				return fmt.Errorf("missing value after -t")
+			}
+			tag = args[i+1]
+			i += 2
+		case "-f":
+			if i+1 >= len(args) {
+				return fmt.Errorf("missing value after -f")
+			}
+			dockerfile = args[i+1]
+			i += 2
+		default:
+			if strings.HasPrefix(args[i], "-") {
+				return fmt.Errorf("unknown build option: %s", args[i])
+			}
+			if context != "" {
+				return fmt.Errorf("image build accepts exactly one context directory")
+			}
+			context = args[i]
+			i++
+		}
+	}
+
+	if tag == "" || dockerfile == "" || context == "" {
+		return fmt.Errorf("usage: minicontainer image build -t <name[:tag]> -f <Dockerfile-path> <context-dir>")
+	}
+
+	return container.BuildImage(tag, dockerfile, context)
+}
+
 type cliOptions struct {
 	Env    []string
 	Mounts []container.Mount
@@ -238,21 +360,20 @@ func help() {
 	fmt.Println(`minicontainer - tiny educational container runtime
 
 Usage:
-  minicontainer run [-e KEY=value]... [-v /host:/container]... [-p HOST_PORT:CONTAINER_PORT]... <rootfs> <command> [args...]
-  minicontainer create <id> [-e KEY=value]... [-v /host:/container]... [-p HOST_PORT:CONTAINER_PORT]... <rootfs> <command> [args...]
+  minicontainer run [-e KEY=value]... [-v /host:/container]... [-p HOST_PORT:CONTAINER_PORT]... <rootfs-or-image> <command> [args...]
+  minicontainer create <id> [-e KEY=value]... [-v /host:/container]... [-p HOST_PORT:CONTAINER_PORT]... <rootfs-or-image> <command> [args...]
   minicontainer start <id>
   minicontainer stop <id>
   minicontainer rm <id>
   minicontainer logs <id> [stdout|stderr]
   minicontainer exec <id> <command> [args...]
-  minicontainer help
-
-Examples:
-  sudo ./minicontainer run -e NAME=ved -v /tmp:/hosttmp -p 8080:80 /var/lib/minicontainer/images/alpine /bin/sh
-  sudo ./minicontainer create demo -e NAME=ved -v /tmp:/hosttmp -p 8080:80 /var/lib/minicontainer/images/alpine /bin/sh
-  sudo ./minicontainer start demo
-  sudo ./minicontainer exec demo /bin/sh
-  sudo ./minicontainer logs demo
-  sudo ./minicontainer stop demo
-  sudo ./minicontainer rm demo`)
+  minicontainer image add <name[:tag]> <rootfs-path>
+  minicontainer image ls
+  minicontainer image inspect <name[:tag]>
+  minicontainer image rm <name[:tag]>
+  minicontainer image import <name[:tag]> <rootfs-tar-path>
+  minicontainer image export <name[:tag]> <output-tar-path>
+  minicontainer image pull <name[:tag]>
+  minicontainer image build -t <name[:tag]> -f <Dockerfile-path> <context-dir>
+  minicontainer help`)
 }

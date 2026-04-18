@@ -151,6 +151,17 @@ func Start(id string) error {
 		return err
 	}
 
+	if err := waitForProcessAlive(containerPID, 500*time.Millisecond); err != nil {
+		_ = syscall.Kill(cmd.Process.Pid, syscall.SIGKILL)
+		_ = os.Remove(pidFile)
+		_ = cleanupPublishedPortRules(state.Ports)
+		state.Status = "created"
+		state.PID = 0
+		state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		_ = writeState(state)
+		return err
+	}
+
 	state.Status = "running"
 	state.PID = containerPID
 	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -158,6 +169,7 @@ func Start(id string) error {
 	if err := writeState(state); err != nil {
 		_ = syscall.Kill(cmd.Process.Pid, syscall.SIGKILL)
 		_ = os.Remove(pidFile)
+		_ = cleanupPublishedPortRules(state.Ports)
 		return err
 	}
 
@@ -187,6 +199,23 @@ func waitForPIDFile(path string, timeout time.Duration) (int, error) {
 	}
 
 	return 0, fmt.Errorf("timed out waiting for container pidfile")
+}
+
+func waitForProcessAlive(pid int, duration time.Duration) error {
+	deadline := time.Now().Add(duration)
+
+	for time.Now().Before(deadline) {
+		if !processAlive(pid) {
+			return fmt.Errorf("container process %d exited immediately", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if !processAlive(pid) {
+		return fmt.Errorf("container process %d exited immediately", pid)
+	}
+
+	return nil
 }
 
 func bytesTrimSpace(data []byte) string {
@@ -226,6 +255,7 @@ func Stop(id string) error {
 	}
 
 	if state.PID <= 0 || !processAlive(state.PID) {
+		_ = cleanupPublishedPortRules(state.Ports)
 		state.Status = "stopped"
 		state.PID = 0
 		state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -239,6 +269,7 @@ func Stop(id string) error {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if !processAlive(state.PID) {
+			_ = cleanupPublishedPortRules(state.Ports)
 			state.Status = "stopped"
 			state.PID = 0
 			state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -251,6 +282,7 @@ func Stop(id string) error {
 		return fmt.Errorf("send SIGKILL: %w", err)
 	}
 
+	_ = cleanupPublishedPortRules(state.Ports)
 	state.Status = "stopped"
 	state.PID = 0
 	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -271,6 +303,7 @@ func Remove(id string) error {
 		return fmt.Errorf("container %q is still running", id)
 	}
 
+	_ = cleanupPublishedPortRules(state.Ports)
 	return os.RemoveAll(containerDir(id))
 }
 
