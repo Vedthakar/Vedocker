@@ -1,0 +1,8 @@
+Phase 1 proof:
+- Built custom Go runtime with run -> child re-exec flow
+- Uses Linux namespaces
+- Sets isolated hostname
+- Child sees PID 1
+- Uses Alpine rootfs via chroot
+- Mounts /proc inside container
+- Successfully ran /bin/sh inside isolated environment
