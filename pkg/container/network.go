@@ -155,6 +155,9 @@ func addSinglePublishedPortRule(p Port) error {
 	containerDest := fmt.Sprintf("%s:%d", publishedContainerIP, p.ContainerPort)
 	containerPort := strconv.Itoa(p.ContainerPort)
 
+	if err := enableRouteLocalnet(); err != nil {
+		return err
+	}
 	if err := runIPTables("-t", "nat", "-A", "PREROUTING", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest); err != nil {
 		return err
 	}
@@ -163,6 +166,12 @@ func addSinglePublishedPortRule(p Port) error {
 		return err
 	}
 	if err := runIPTables("-A", "FORWARD", "-p", "tcp", "-d", publishedContainerIP, "--dport", containerPort, "-j", "ACCEPT"); err != nil {
+		_ = runIPTables("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest)
+		_ = runIPTables("-t", "nat", "-D", "PREROUTING", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest)
+		return err
+	}
+	if err := runIPTables("-t", "nat", "-A", "POSTROUTING", "-p", "tcp", "-d", publishedContainerIP, "--dport", containerPort, "-j", "MASQUERADE"); err != nil {
+		_ = runIPTables("-D", "FORWARD", "-p", "tcp", "-d", publishedContainerIP, "--dport", containerPort, "-j", "ACCEPT")
 		_ = runIPTables("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest)
 		_ = runIPTables("-t", "nat", "-D", "PREROUTING", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest)
 		return err
@@ -187,7 +196,20 @@ func cleanupPublishedPortRules(ports []Port) error {
 		return err
 	}
 
+	if err := cleanupPostroutingRulesForPublishedContainer(); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func cleanupPostroutingRulesForPublishedContainer() error {
+	return deleteRulesMatching("nat", "POSTROUTING", func(line string) bool {
+		return strings.HasPrefix(line, "-A POSTROUTING ") &&
+			strings.Contains(line, "-p tcp") &&
+			strings.Contains(line, "-d "+publishedContainerIP) &&
+			strings.Contains(line, "-j MASQUERADE")
+	})
 }
 
 func cleanupDNATRulesForHostPort(hostPort int) error {
@@ -303,6 +325,15 @@ func enableIPv4Forwarding() error {
 	return os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0o644)
 }
 
+func enableRouteLocalnet() error {
+	if err := os.WriteFile("/proc/sys/net/ipv4/conf/all/route_localnet", []byte("1\n"), 0o644); err != nil {
+		return fmt.Errorf("enable route_localnet all: %w", err)
+	}
+	if err := os.WriteFile("/proc/sys/net/ipv4/conf/lo/route_localnet", []byte("1\n"), 0o644); err != nil {
+		return fmt.Errorf("enable route_localnet lo: %w", err)
+	}
+	return nil
+}
 func runIP(args ...string) error {
 	cmd := exec.Command("ip", args...)
 	out, err := cmd.CombinedOutput()

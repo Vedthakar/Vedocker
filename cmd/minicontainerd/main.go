@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,10 +11,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/vthecar/minicontainer/pkg/container"
+	"github.com/vthecar/minicontainer/pkg/deploy"
 )
 
 const (
@@ -32,7 +35,8 @@ type createContainerRequest struct {
 }
 
 type deployRepoRequest struct {
-	RepoURL string `json:"repo_url"`
+	RepoURL      string `json:"repo_url"`
+	GeminiAPIKey string `json:"gemini_api_key"`
 }
 
 type deployRepoResponse struct {
@@ -43,6 +47,7 @@ type deployRepoResponse struct {
 	ContainerID    string `json:"container_id,omitempty"`
 	DockerfilePath string `json:"dockerfile_path,omitempty"`
 	NeedsAI        bool   `json:"needs_ai"`
+	AIGenerated    bool   `json:"ai_generated,omitempty"`
 	Reason         string `json:"reason,omitempty"`
 	Error          string `json:"error,omitempty"`
 }
@@ -248,11 +253,11 @@ func handleDeployRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, status := deployRepo(strings.TrimSpace(req.RepoURL))
+	resp, status := deployRepo(strings.TrimSpace(req.RepoURL), strings.TrimSpace(req.GeminiAPIKey))
 	writeJSON(w, status, resp)
 }
 
-func deployRepo(repoURL string) (deployRepoResponse, int) {
+func deployRepo(repoURL, geminiAPIKey string) (deployRepoResponse, int) {
 	if repoURL == "" {
 		return deployRepoResponse{
 			OK:      false,
@@ -309,14 +314,65 @@ func deployRepo(repoURL string) (deployRepoResponse, int) {
 			Error:     fmt.Sprintf("scan repo: %v", err),
 		}, http.StatusInternalServerError
 	}
+
+	aiGenerated := false
+
 	if !found {
-		return deployRepoResponse{
-			OK:        false,
-			RepoURL:   normalizedURL,
-			Workspace: jobDir,
-			NeedsAI:   true,
-			Reason:    "no Dockerfile found",
-		}, http.StatusOK
+		if geminiAPIKey == "" {
+			return deployRepoResponse{
+				OK:        false,
+				RepoURL:   normalizedURL,
+				Workspace: jobDir,
+				NeedsAI:   true,
+				Reason:    "no Dockerfile found and no Gemini API key provided",
+			}, http.StatusOK
+		}
+
+		ctx, err := deploy.CollectRepoContext(repoDir)
+		if err != nil {
+			return deployRepoResponse{
+				OK:        false,
+				RepoURL:   normalizedURL,
+				Workspace: jobDir,
+				NeedsAI:   false,
+				Error:     fmt.Sprintf("collect repo context: %v", err),
+			}, http.StatusInternalServerError
+		}
+
+		analysis, err := deploy.AnalyzeRepoWithGemini(geminiAPIKey, normalizedURL, ctx)
+		if err != nil {
+			return deployRepoResponse{
+				OK:        false,
+				RepoURL:   normalizedURL,
+				Workspace: jobDir,
+				NeedsAI:   false,
+				Error:     fmt.Sprintf("Gemini repo analysis failed: %v", err),
+			}, http.StatusInternalServerError
+		}
+
+		generated, err := deploy.GenerateDockerfileWithGemini(geminiAPIKey, normalizedURL, ctx, analysis)
+		if err != nil {
+			return deployRepoResponse{
+				OK:        false,
+				RepoURL:   normalizedURL,
+				Workspace: jobDir,
+				NeedsAI:   false,
+				Error:     fmt.Sprintf("Gemini Dockerfile generation failed: %v", err),
+			}, http.StatusInternalServerError
+		}
+
+		dockerfilePath = filepath.Join(repoDir, "Dockerfile")
+		if err := os.WriteFile(dockerfilePath, []byte(strings.TrimSpace(generated.DockerfileText)+"\n"), 0o644); err != nil {
+			return deployRepoResponse{
+				OK:        false,
+				RepoURL:   normalizedURL,
+				Workspace: jobDir,
+				NeedsAI:   false,
+				Error:     fmt.Sprintf("write generated Dockerfile: %v", err),
+			}, http.StatusInternalServerError
+		}
+
+		aiGenerated = true
 	}
 
 	imageRef := fmt.Sprintf("%s:%s", safeRepo, jobID)
@@ -331,6 +387,7 @@ func deployRepo(repoURL string) (deployRepoResponse, int) {
 			ImageRef:       imageRef,
 			ContainerID:    containerID,
 			NeedsAI:        false,
+			AIGenerated:    aiGenerated,
 			Error:          fmt.Sprintf("build image: %v", err),
 		}, http.StatusInternalServerError
 	}
@@ -345,6 +402,7 @@ func deployRepo(repoURL string) (deployRepoResponse, int) {
 			ImageRef:       imageRef,
 			ContainerID:    containerID,
 			NeedsAI:        false,
+			AIGenerated:    aiGenerated,
 			Error:          fmt.Sprintf("read built image metadata: %v", err),
 		}, http.StatusInternalServerError
 	}
@@ -361,11 +419,13 @@ func deployRepo(repoURL string) (deployRepoResponse, int) {
 			ImageRef:       imageRef,
 			ContainerID:    containerID,
 			NeedsAI:        false,
+			AIGenerated:    aiGenerated,
 			Error:          fmt.Sprintf("resolve built image: %v", err),
 		}, http.StatusInternalServerError
 	}
 
-	if err := container.Create(containerID, rootfs, startupCommand, nil, nil, nil); err != nil {
+	ports, err := detectDockerfilePorts(dockerfilePath)
+	if err != nil {
 		return deployRepoResponse{
 			OK:             false,
 			RepoURL:        normalizedURL,
@@ -374,6 +434,21 @@ func deployRepo(repoURL string) (deployRepoResponse, int) {
 			ImageRef:       imageRef,
 			ContainerID:    containerID,
 			NeedsAI:        false,
+			AIGenerated:    aiGenerated,
+			Error:          fmt.Sprintf("parse Dockerfile EXPOSE: %v", err),
+		}, http.StatusInternalServerError
+	}
+
+	if err := container.Create(containerID, rootfs, startupCommand, nil, nil, ports); err != nil {
+		return deployRepoResponse{
+			OK:             false,
+			RepoURL:        normalizedURL,
+			Workspace:      jobDir,
+			DockerfilePath: dockerfilePath,
+			ImageRef:       imageRef,
+			ContainerID:    containerID,
+			NeedsAI:        false,
+			AIGenerated:    aiGenerated,
 			Error:          fmt.Sprintf("create container: %v", err),
 		}, http.StatusInternalServerError
 	}
@@ -387,6 +462,7 @@ func deployRepo(repoURL string) (deployRepoResponse, int) {
 			ImageRef:       imageRef,
 			ContainerID:    containerID,
 			NeedsAI:        false,
+			AIGenerated:    aiGenerated,
 			Error:          fmt.Sprintf("start container: %v", err),
 		}, http.StatusInternalServerError
 	}
@@ -399,7 +475,65 @@ func deployRepo(repoURL string) (deployRepoResponse, int) {
 		ContainerID:    containerID,
 		DockerfilePath: dockerfilePath,
 		NeedsAI:        false,
+		AIGenerated:    aiGenerated,
 	}, http.StatusOK
+}
+func detectDockerfilePorts(dockerfilePath string) ([]container.Port, error) {
+	f, err := os.Open(dockerfilePath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		name := strings.ToUpper(strings.TrimSpace(parts[0]))
+		if name != "EXPOSE" {
+			continue
+		}
+
+		args := strings.TrimSpace(parts[1])
+		if args == "" {
+			continue
+		}
+
+		fields := strings.Fields(args)
+		if len(fields) == 0 {
+			continue
+		}
+
+		first := strings.TrimSpace(fields[0])
+		first = strings.TrimSuffix(first, "/tcp")
+		first = strings.TrimSuffix(first, "/udp")
+
+		port, err := strconv.Atoi(first)
+		if err != nil || port <= 0 || port > 65535 {
+			continue
+		}
+
+		return []container.Port{
+			{
+				HostPort:      port,
+				ContainerPort: port,
+			},
+		}, nil
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return nil, nil
 }
 
 func resolveImageStartupCommand(img *container.Image) []string {
