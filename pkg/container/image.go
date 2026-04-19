@@ -25,12 +25,14 @@ const (
 )
 
 type Image struct {
-	Name      string `json:"name"`
-	Tag       string `json:"tag"`
-	Ref       string `json:"ref"`
-	Rootfs    string `json:"rootfs"`
-	Source    string `json:"source"`
-	CreatedAt string `json:"created_at"`
+	Name       string   `json:"name"`
+	Tag        string   `json:"tag"`
+	Ref        string   `json:"ref"`
+	Rootfs     string   `json:"rootfs"`
+	Source     string   `json:"source"`
+	CreatedAt  string   `json:"created_at"`
+	Entrypoint []string `json:"entrypoint,omitempty"`
+	Cmd        []string `json:"cmd,omitempty"`
 }
 
 type registryDescriptor struct {
@@ -187,6 +189,13 @@ func GetImage(ref string) (*Image, error) {
 	}
 
 	return &img, nil
+}
+
+func IsImageNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "image ") && strings.Contains(err.Error(), " not found")
 }
 
 func RemoveImage(ref string) error {
@@ -748,6 +757,10 @@ func unpackLayerTar(r io.Reader, dest string) error {
 }
 
 func writeImageMetadata(ref, rootfs, source string) error {
+	return writeImageMetadataWithConfig(ref, rootfs, source, nil, nil)
+}
+
+func writeImageMetadataWithConfig(ref, rootfs, source string, entrypoint, cmd []string) error {
 	name, tag, err := ParseImageRef(ref)
 	if err != nil {
 		return err
@@ -771,12 +784,14 @@ func writeImageMetadata(ref, rootfs, source string) error {
 	}
 
 	image := Image{
-		Name:      name,
-		Tag:       tag,
-		Ref:       name + ":" + tag,
-		Rootfs:    absRootfs,
-		Source:    source,
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		Name:       name,
+		Tag:        tag,
+		Ref:        name + ":" + tag,
+		Rootfs:     absRootfs,
+		Source:     source,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		Entrypoint: copyStringSlice(entrypoint),
+		Cmd:        copyStringSlice(cmd),
 	}
 
 	data, err := json.MarshalIndent(image, "", "  ")
@@ -797,6 +812,15 @@ func writeImageMetadata(ref, rootfs, source string) error {
 	}
 
 	return nil
+}
+
+func copyStringSlice(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, len(in))
+	copy(out, in)
+	return out
 }
 
 func imageRefFile(name, tag string) string {

@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/vthecar/minicontainer/pkg/container"
 )
@@ -18,12 +20,31 @@ const (
 	listenAddr         = "127.0.0.1:18080"
 	containerStateRoot = "/var/lib/minicontainer/containers"
 	cliPathEnvVar      = "MINICONTAINER_CLI_PATH"
+	workspaceRoot      = "/var/lib/minicontainer/workspaces"
 )
+
+var githubRepoURLPattern = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+?)(?:\.git)?/?$`)
 
 type createContainerRequest struct {
 	ID      string   `json:"id"`
 	Image   string   `json:"image"`
 	Command []string `json:"command"`
+}
+
+type deployRepoRequest struct {
+	RepoURL string `json:"repo_url"`
+}
+
+type deployRepoResponse struct {
+	OK             bool   `json:"ok"`
+	RepoURL        string `json:"repo_url"`
+	Workspace      string `json:"workspace,omitempty"`
+	ImageRef       string `json:"image_ref,omitempty"`
+	ContainerID    string `json:"container_id,omitempty"`
+	DockerfilePath string `json:"dockerfile_path,omitempty"`
+	NeedsAI        bool   `json:"needs_ai"`
+	Reason         string `json:"reason,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 func main() {
@@ -39,6 +60,8 @@ func main() {
 	mux.HandleFunc("/containers", handleContainers)
 	mux.HandleFunc("/containers/create", handleCreateContainer)
 	mux.HandleFunc("/containers/", handleContainerRoutes)
+
+	mux.HandleFunc("/deployments/repo", handleDeployRepo)
 
 	server := &http.Server{
 		Addr:    listenAddr,
@@ -207,6 +230,302 @@ func handleCreateContainer(w http.ResponseWriter, r *http.Request) {
 		"ok": true,
 		"id": req.ID,
 	})
+}
+
+func handleDeployRepo(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/deployments/repo" {
+		writeNotFound(w, "endpoint not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+
+	var req deployRepoRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeBadRequest(w, fmt.Sprintf("invalid JSON body: %v", err))
+		return
+	}
+
+	resp, status := deployRepo(strings.TrimSpace(req.RepoURL))
+	writeJSON(w, status, resp)
+}
+
+func deployRepo(repoURL string) (deployRepoResponse, int) {
+	if repoURL == "" {
+		return deployRepoResponse{
+			OK:      false,
+			NeedsAI: false,
+			Error:   "repo_url is required",
+		}, http.StatusBadRequest
+	}
+
+	_, repoName, normalizedURL, err := validateGitHubRepoURL(repoURL)
+	if err != nil {
+		return deployRepoResponse{
+			OK:      false,
+			RepoURL: repoURL,
+			NeedsAI: false,
+			Error:   err.Error(),
+		}, http.StatusBadRequest
+	}
+
+	jobID := uniqueSuffix()
+	safeRepo := sanitizeName(repoName)
+	if safeRepo == "" {
+		safeRepo = "repo"
+	}
+
+	jobDir := filepath.Join(workspaceRoot, safeRepo+"-"+jobID)
+	repoDir := filepath.Join(jobDir, "repo")
+
+	if err := os.MkdirAll(jobDir, 0o755); err != nil {
+		return deployRepoResponse{
+			OK:      false,
+			RepoURL: normalizedURL,
+			NeedsAI: false,
+			Error:   fmt.Sprintf("create workspace: %v", err),
+		}, http.StatusInternalServerError
+	}
+
+	if err := cloneGitHubRepo(normalizedURL, repoDir); err != nil {
+		return deployRepoResponse{
+			OK:        false,
+			RepoURL:   normalizedURL,
+			Workspace: jobDir,
+			NeedsAI:   false,
+			Error:     fmt.Sprintf("clone repo: %v", err),
+		}, http.StatusInternalServerError
+	}
+
+	dockerfilePath, found, err := findDockerfile(repoDir)
+	if err != nil {
+		return deployRepoResponse{
+			OK:        false,
+			RepoURL:   normalizedURL,
+			Workspace: jobDir,
+			NeedsAI:   false,
+			Error:     fmt.Sprintf("scan repo: %v", err),
+		}, http.StatusInternalServerError
+	}
+	if !found {
+		return deployRepoResponse{
+			OK:        false,
+			RepoURL:   normalizedURL,
+			Workspace: jobDir,
+			NeedsAI:   true,
+			Reason:    "no Dockerfile found",
+		}, http.StatusOK
+	}
+
+	imageRef := fmt.Sprintf("%s:%s", safeRepo, jobID)
+	containerID := fmt.Sprintf("%s-%s", safeRepo, uniqueSuffix())
+
+	if err := container.BuildImage(imageRef, dockerfilePath, repoDir); err != nil {
+		return deployRepoResponse{
+			OK:             false,
+			RepoURL:        normalizedURL,
+			Workspace:      jobDir,
+			DockerfilePath: dockerfilePath,
+			ImageRef:       imageRef,
+			ContainerID:    containerID,
+			NeedsAI:        false,
+			Error:          fmt.Sprintf("build image: %v", err),
+		}, http.StatusInternalServerError
+	}
+
+	builtImage, err := container.GetImage(imageRef)
+	if err != nil {
+		return deployRepoResponse{
+			OK:             false,
+			RepoURL:        normalizedURL,
+			Workspace:      jobDir,
+			DockerfilePath: dockerfilePath,
+			ImageRef:       imageRef,
+			ContainerID:    containerID,
+			NeedsAI:        false,
+			Error:          fmt.Sprintf("read built image metadata: %v", err),
+		}, http.StatusInternalServerError
+	}
+
+	startupCommand := resolveImageStartupCommand(builtImage)
+
+	rootfs, err := container.ResolveRootfs(imageRef)
+	if err != nil {
+		return deployRepoResponse{
+			OK:             false,
+			RepoURL:        normalizedURL,
+			Workspace:      jobDir,
+			DockerfilePath: dockerfilePath,
+			ImageRef:       imageRef,
+			ContainerID:    containerID,
+			NeedsAI:        false,
+			Error:          fmt.Sprintf("resolve built image: %v", err),
+		}, http.StatusInternalServerError
+	}
+
+	if err := container.Create(containerID, rootfs, startupCommand, nil, nil, nil); err != nil {
+		return deployRepoResponse{
+			OK:             false,
+			RepoURL:        normalizedURL,
+			Workspace:      jobDir,
+			DockerfilePath: dockerfilePath,
+			ImageRef:       imageRef,
+			ContainerID:    containerID,
+			NeedsAI:        false,
+			Error:          fmt.Sprintf("create container: %v", err),
+		}, http.StatusInternalServerError
+	}
+
+	if err := startContainerViaCLI(containerID); err != nil {
+		return deployRepoResponse{
+			OK:             false,
+			RepoURL:        normalizedURL,
+			Workspace:      jobDir,
+			DockerfilePath: dockerfilePath,
+			ImageRef:       imageRef,
+			ContainerID:    containerID,
+			NeedsAI:        false,
+			Error:          fmt.Sprintf("start container: %v", err),
+		}, http.StatusInternalServerError
+	}
+
+	return deployRepoResponse{
+		OK:             true,
+		RepoURL:        normalizedURL,
+		Workspace:      jobDir,
+		ImageRef:       imageRef,
+		ContainerID:    containerID,
+		DockerfilePath: dockerfilePath,
+		NeedsAI:        false,
+	}, http.StatusOK
+}
+
+func resolveImageStartupCommand(img *container.Image) []string {
+	entrypoint := trimCommandSlice(img.Entrypoint)
+	cmd := trimCommandSlice(img.Cmd)
+
+	switch {
+	case len(entrypoint) > 0 && len(cmd) > 0:
+		out := append([]string{}, entrypoint...)
+		out = append(out, cmd...)
+		return out
+	case len(entrypoint) > 0:
+		return append([]string{}, entrypoint...)
+	case len(cmd) > 0:
+		return append([]string{}, cmd...)
+	default:
+		return []string{"/bin/sh"}
+	}
+}
+
+func trimCommandSlice(in []string) []string {
+	var out []string
+	for _, part := range in {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
+}
+
+func validateGitHubRepoURL(repoURL string) (owner, repo, normalized string, err error) {
+	matches := githubRepoURLPattern.FindStringSubmatch(repoURL)
+	if matches == nil {
+		return "", "", "", fmt.Errorf("repo_url must be https://github.com/<owner>/<repo>")
+	}
+
+	owner = matches[1]
+	repo = matches[2]
+	if repo == "" {
+		return "", "", "", fmt.Errorf("repo_url must include a repo name")
+	}
+
+	normalized = fmt.Sprintf("https://github.com/%s/%s", owner, repo)
+	return owner, repo, normalized, nil
+}
+
+func cloneGitHubRepo(repoURL, targetDir string) error {
+	if _, err := exec.LookPath("git"); err != nil {
+		return fmt.Errorf("git not found in PATH")
+	}
+
+	cmd := exec.Command("git", "clone", "--depth", "1", repoURL, targetDir)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func findDockerfile(repoDir string) (string, bool, error) {
+	rootDockerfile := filepath.Join(repoDir, "Dockerfile")
+	info, err := os.Stat(rootDockerfile)
+	if err == nil && !info.IsDir() {
+		return rootDockerfile, true, nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return "", false, err
+	}
+
+	var firstFound string
+	err = filepath.Walk(repoDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if firstFound != "" {
+			return nil
+		}
+		if info.IsDir() {
+			name := info.Name()
+			if name == ".git" || name == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info.Name() == "Dockerfile" {
+			firstFound = path
+		}
+		return nil
+	})
+	if err != nil {
+		return "", false, err
+	}
+	if firstFound == "" {
+		return "", false, nil
+	}
+	return firstFound, true, nil
+}
+
+func sanitizeName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	for _, r := range s {
+		isLower := r >= 'a' && r <= 'z'
+		isDigit := r >= '0' && r <= '9'
+		if isLower || isDigit {
+			b.WriteRune(r)
+			continue
+		}
+		if r == '-' || r == '_' || r == '.' {
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	out = strings.ReplaceAll(out, "--", "-")
+	if out == "" {
+		return "repo"
+	}
+	return out
+}
+
+func uniqueSuffix() string {
+	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
 
 func handleContainerRoutes(w http.ResponseWriter, r *http.Request) {

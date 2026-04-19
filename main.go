@@ -367,13 +367,6 @@ Usage:
   minicontainer rm <id>
   minicontainer logs <id> [stdout|stderr]
   minicontainer exec <id> <command> [args...]
-  minicontainer image add <name[:tag]> <rootfs-path>
-  minicontainer image ls
-  minicontainer image inspect <name[:tag]>
-  minicontainer image rm <name[:tag]>
-  minicontainer image import <name[:tag]> <rootfs-tar-path>
-  minicontainer image export <name[:tag]> <output-tar-path>
-  minicontainer image pull <name[:tag]>
-  minicontainer image build -t <name[:tag]> -f <Dockerfile-path> <context-dir>
-  minicontainer help`)
+  minicontainer image <add|ls|inspect|rm|import|export|pull|build> ...
+`)
 }
