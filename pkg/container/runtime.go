@@ -1,11 +1,14 @@
 package container
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -24,11 +27,67 @@ const (
 	defaultGatewayEnv = "MINICONTAINER_DEFAULT_GW"
 	pidFileEnv        = "MINICONTAINER_PIDFILE"
 
-	defaultHostCIDR   = "10.200.1.1/24"
-	defaultContCIDR   = "10.200.1.2/24"
-	defaultGatewayIP  = "10.200.1.1"
-	defaultContIfName = "eth0"
+	defaultHostCIDR     = "10.200.1.1/24"
+	defaultGatewayIP    = "10.200.1.1"
+	defaultSubnetPrefix = "10.200.1."
+	defaultContIfName   = "eth0"
 )
+
+func allocateContainerIP(statesRoot string) (string, error) {
+	used := map[string]bool{
+		defaultGatewayIP: true,
+	}
+
+	entries, err := os.ReadDir(statesRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return defaultSubnetPrefix + "2", nil
+		}
+		return "", fmt.Errorf("read container state root: %w", err)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		statePath := filepath.Join(statesRoot, entry.Name(), "state.json")
+		data, err := os.ReadFile(statePath)
+		if err != nil {
+			continue
+		}
+
+		var st ContainerState
+		if err := json.Unmarshal(data, &st); err != nil {
+			continue
+		}
+
+		if st.IP != "" {
+			used[st.IP] = true
+			continue
+		}
+
+		if st.CIDR != "" {
+			ip := strings.Split(st.CIDR, "/")[0]
+			if ip != "" {
+				used[ip] = true
+			}
+		}
+	}
+
+	for i := 2; i <= 254; i++ {
+		ip := defaultSubnetPrefix + strconv.Itoa(i)
+		if !used[ip] {
+			return ip, nil
+		}
+	}
+
+	return "", fmt.Errorf("no free container IPs left in 10.200.1.0/24")
+}
+
+func containerCIDR(ip string) string {
+	return ip + "/24"
+}
 
 func Run(rootfs string, command []string, extraEnv []string, mounts []Mount, ports []Port) error {
 	if os.Geteuid() != 0 {
@@ -77,15 +136,31 @@ func Run(rootfs string, command []string, extraEnv []string, mounts []Mount, por
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.ExtraFiles = []*os.File{syncR}
+
+	hostCIDR := os.Getenv(hostVethAddrEnv)
+	if hostCIDR == "" {
+		hostCIDR = defaultHostCIDR
+	}
+
+	contCIDR := os.Getenv(contVethAddrEnv)
+	if contCIDR == "" {
+		return fmt.Errorf("missing %s", contVethAddrEnv)
+	}
+
+	gatewayIP := os.Getenv(defaultGatewayEnv)
+	if gatewayIP == "" {
+		gatewayIP = defaultGatewayIP
+	}
+
 	cmd.Env = append(os.Environ(),
 		cgroupEnvVar+"="+cgroupPath,
 		netReadyFDEnv+"=3",
 		hostVethNameEnv+"="+hostIf,
 		contVethNameEnv+"="+contIf,
-		hostVethAddrEnv+"="+defaultHostCIDR,
-		contVethAddrEnv+"="+defaultContCIDR,
+		hostVethAddrEnv+"="+hostCIDR,
+		contVethAddrEnv+"="+contCIDR,
 		contIfRenameEnv+"="+defaultContIfName,
-		defaultGatewayEnv+"="+defaultGatewayIP,
+		defaultGatewayEnv+"="+gatewayIP,
 	)
 
 	if pidFile := os.Getenv(pidFileEnv); pidFile != "" {

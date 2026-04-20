@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-svc
+spec:
+  deployment: demo
+  port: 9000
+  targetPort: 8080

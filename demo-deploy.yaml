@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 3
+  template:
+    image: alpine:latest
+    command:
+      - /bin/sh
+      - -c
+      - sleep 3600
+    ports: []

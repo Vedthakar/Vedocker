@@ -12,12 +12,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const publishedContainerIP = "10.200.1.2"
-
 type ifreqFlags struct {
 	Name  [unix.IFNAMSIZ]byte
 	Flags uint16
 	Pad   [22]byte
+}
+
+func currentContainerIP() string {
+	contCIDR := os.Getenv(contVethAddrEnv)
+	if contCIDR == "" {
+		return ""
+	}
+	parts := strings.SplitN(contCIDR, "/", 2)
+	return parts[0]
 }
 
 func waitForParentNetwork() error {
@@ -134,25 +141,30 @@ func setupPublishedPorts(ports []Port) (func(), error) {
 		return func() {}, nil
 	}
 
-	if err := cleanupPublishedPortRules(ports); err != nil {
+	containerIP := currentContainerIP()
+	if containerIP == "" {
+		return nil, fmt.Errorf("missing container IP for published ports")
+	}
+
+	if err := cleanupPublishedPortRules(containerIP, ports); err != nil {
 		return nil, err
 	}
 
 	for _, p := range ports {
-		if err := addSinglePublishedPortRule(p); err != nil {
-			_ = cleanupPublishedPortRules(ports)
+		if err := addSinglePublishedPortRule(containerIP, p); err != nil {
+			_ = cleanupPublishedPortRules(containerIP, ports)
 			return nil, err
 		}
 	}
 
 	return func() {
-		_ = cleanupPublishedPortRules(ports)
+		_ = cleanupPublishedPortRules(containerIP, ports)
 	}, nil
 }
 
-func addSinglePublishedPortRule(p Port) error {
+func addSinglePublishedPortRule(containerIP string, p Port) error {
 	hostPort := strconv.Itoa(p.HostPort)
-	containerDest := fmt.Sprintf("%s:%d", publishedContainerIP, p.ContainerPort)
+	containerDest := fmt.Sprintf("%s:%d", containerIP, p.ContainerPort)
 	containerPort := strconv.Itoa(p.ContainerPort)
 
 	if err := enableRouteLocalnet(); err != nil {
@@ -165,13 +177,13 @@ func addSinglePublishedPortRule(p Port) error {
 		_ = runIPTables("-t", "nat", "-D", "PREROUTING", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest)
 		return err
 	}
-	if err := runIPTables("-A", "FORWARD", "-p", "tcp", "-d", publishedContainerIP, "--dport", containerPort, "-j", "ACCEPT"); err != nil {
+	if err := runIPTables("-A", "FORWARD", "-p", "tcp", "-d", containerIP, "--dport", containerPort, "-j", "ACCEPT"); err != nil {
 		_ = runIPTables("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest)
 		_ = runIPTables("-t", "nat", "-D", "PREROUTING", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest)
 		return err
 	}
-	if err := runIPTables("-t", "nat", "-A", "POSTROUTING", "-p", "tcp", "-d", publishedContainerIP, "--dport", containerPort, "-j", "MASQUERADE"); err != nil {
-		_ = runIPTables("-D", "FORWARD", "-p", "tcp", "-d", publishedContainerIP, "--dport", containerPort, "-j", "ACCEPT")
+	if err := runIPTables("-t", "nat", "-A", "POSTROUTING", "-p", "tcp", "-d", containerIP, "--dport", containerPort, "-j", "MASQUERADE"); err != nil {
+		_ = runIPTables("-D", "FORWARD", "-p", "tcp", "-d", containerIP, "--dport", containerPort, "-j", "ACCEPT")
 		_ = runIPTables("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest)
 		_ = runIPTables("-t", "nat", "-D", "PREROUTING", "-p", "tcp", "--dport", hostPort, "-j", "DNAT", "--to-destination", containerDest)
 		return err
@@ -180,39 +192,39 @@ func addSinglePublishedPortRule(p Port) error {
 	return nil
 }
 
-func cleanupPublishedPortRules(ports []Port) error {
+func cleanupPublishedPortRules(containerIP string, ports []Port) error {
 	hostPorts := make(map[int]struct{})
 	for _, p := range ports {
 		hostPorts[p.HostPort] = struct{}{}
 	}
 
 	for hostPort := range hostPorts {
-		if err := cleanupDNATRulesForHostPort(hostPort); err != nil {
+		if err := cleanupDNATRulesForHostPort(containerIP, hostPort); err != nil {
 			return err
 		}
 	}
 
-	if err := cleanupForwardRulesForPublishedContainer(); err != nil {
+	if err := cleanupForwardRulesForPublishedContainer(containerIP); err != nil {
 		return err
 	}
 
-	if err := cleanupPostroutingRulesForPublishedContainer(); err != nil {
+	if err := cleanupPostroutingRulesForPublishedContainer(containerIP); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func cleanupPostroutingRulesForPublishedContainer() error {
+func cleanupPostroutingRulesForPublishedContainer(containerIP string) error {
 	return deleteRulesMatching("nat", "POSTROUTING", func(line string) bool {
 		return strings.HasPrefix(line, "-A POSTROUTING ") &&
 			strings.Contains(line, "-p tcp") &&
-			strings.Contains(line, "-d "+publishedContainerIP) &&
+			strings.Contains(line, "-d "+containerIP) &&
 			strings.Contains(line, "-j MASQUERADE")
 	})
 }
 
-func cleanupDNATRulesForHostPort(hostPort int) error {
+func cleanupDNATRulesForHostPort(containerIP string, hostPort int) error {
 	match := fmt.Sprintf("--dport %d", hostPort)
 
 	if err := deleteRulesMatching("nat", "PREROUTING", func(line string) bool {
@@ -220,7 +232,7 @@ func cleanupDNATRulesForHostPort(hostPort int) error {
 			strings.Contains(line, "-p tcp") &&
 			strings.Contains(line, match) &&
 			strings.Contains(line, "-j DNAT") &&
-			strings.Contains(line, "--to-destination "+publishedContainerIP+":")
+			strings.Contains(line, "--to-destination "+containerIP+":")
 	}); err != nil {
 		return err
 	}
@@ -230,7 +242,7 @@ func cleanupDNATRulesForHostPort(hostPort int) error {
 			strings.Contains(line, "-p tcp") &&
 			strings.Contains(line, match) &&
 			strings.Contains(line, "-j DNAT") &&
-			strings.Contains(line, "--to-destination "+publishedContainerIP+":")
+			strings.Contains(line, "--to-destination "+containerIP+":")
 	}); err != nil {
 		return err
 	}
@@ -238,11 +250,11 @@ func cleanupDNATRulesForHostPort(hostPort int) error {
 	return nil
 }
 
-func cleanupForwardRulesForPublishedContainer() error {
+func cleanupForwardRulesForPublishedContainer(containerIP string) error {
 	return deleteRulesMatching("", "FORWARD", func(line string) bool {
 		return strings.HasPrefix(line, "-A FORWARD ") &&
 			strings.Contains(line, "-p tcp") &&
-			strings.Contains(line, "-d "+publishedContainerIP) &&
+			strings.Contains(line, "-d "+containerIP) &&
 			strings.Contains(line, "-j ACCEPT")
 	})
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -20,10 +21,12 @@ import (
 )
 
 const (
-	listenAddr         = "127.0.0.1:18080"
-	containerStateRoot = "/var/lib/minicontainer/containers"
-	cliPathEnvVar      = "MINICONTAINER_CLI_PATH"
-	workspaceRoot      = "/var/lib/minicontainer/workspaces"
+	listenAddr          = "127.0.0.1:18080"
+	containerStateRoot  = "/var/lib/minicontainer/containers"
+	cliPathEnvVar       = "MINICONTAINER_CLI_PATH"
+	workspaceRoot       = "/var/lib/minicontainer/workspaces"
+	reconcileInterval   = 5 * time.Second
+	serviceSyncInterval = 3 * time.Second
 )
 
 var githubRepoURLPattern = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+?)(?:\.git)?/?$`)
@@ -68,16 +71,64 @@ func main() {
 
 	mux.HandleFunc("/deployments/repo", handleDeployRepo)
 
+	serviceManager := NewServiceManager("/var/lib/minicontainer/services")
+	registerK8sUIAPI(mux, serviceManager)
+
 	server := &http.Server{
 		Addr:    listenAddr,
 		Handler: loggingMiddleware(mux),
 	}
+
+	go startBackgroundReconcileLoop()
+
+	if err := serviceManager.Sync(); err != nil {
+		fmt.Fprintf(os.Stderr, "initial service sync failed: %v\n", err)
+	}
+	go syncServicesPeriodically(serviceManager, serviceSyncInterval, func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, format+"\n", args...)
+	})
 
 	fmt.Printf("minicontainerd listening on http://%s\n", listenAddr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintf(os.Stderr, "daemon error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func startBackgroundReconcileLoop() {
+	ticker := time.NewTicker(reconcileInterval)
+	defer ticker.Stop()
+
+	for {
+		if err := runReconcileAllViaCLI(); err != nil {
+			fmt.Fprintf(os.Stderr, "background reconcile error: %v\n", err)
+		}
+		<-ticker.C
+	}
+}
+
+func runReconcileAllViaCLI() error {
+	cliPath, err := resolveCLIPath()
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command(cliPath, "deploy", "reconcile-all")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			return fmt.Errorf("deploy reconcile-all: %w", err)
+		}
+		return fmt.Errorf("deploy reconcile-all: %s", msg)
+	}
+
+	msg := strings.TrimSpace(string(out))
+	if msg != "" {
+		fmt.Println(msg)
+	}
+
+	return nil
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {
@@ -977,4 +1028,328 @@ func writeMethodNotAllowed(w http.ResponseWriter, allowed ...string) {
 	writeJSON(w, http.StatusMethodNotAllowed, map[string]any{
 		"error": "method not allowed",
 	})
+}
+
+type K8sPodView struct {
+	Name          string `json:"name"`
+	ContainerName string `json:"container_name"`
+	IP            string `json:"ip"`
+	Status        string `json:"status"`
+	UpdatedAt     string `json:"updated_at"`
+}
+
+type K8sDeploymentView struct {
+	Name      string `json:"name"`
+	Replicas  int    `json:"replicas"`
+	UpdatedAt string `json:"updated_at"`
+	CreatedAt string `json:"created_at"`
+}
+
+type K8sServiceView struct {
+	Name       string `json:"name"`
+	Deployment string `json:"deployment"`
+	Port       int    `json:"port"`
+	TargetPort int    `json:"target_port"`
+	UpdatedAt  string `json:"updated_at"`
+	CreatedAt  string `json:"created_at"`
+}
+
+type K8sStatusView struct {
+	ReconcileLoopRunning bool   `json:"reconcile_loop_running"`
+	ServiceLayerStatus   string `json:"service_layer_status"`
+}
+
+func runMiniContainerCLI(args ...string) error {
+	cliPath, err := resolveCLIPath()
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command(cliPath, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			return err
+		}
+		return fmt.Errorf("%s", msg)
+	}
+	return nil
+}
+
+func listK8sPodsForUI() ([]K8sPodView, error) {
+	pods, err := readJSONFilesForUI[DaemonPodState]("/var/lib/minicontainer/pods")
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]K8sPodView, 0, len(pods))
+	for _, p := range pods {
+		containerName := p.ContainerName
+		if containerName == "" {
+			containerName = p.Name
+		}
+
+		view := K8sPodView{
+			Name:          p.Name,
+			ContainerName: containerName,
+			UpdatedAt:     p.UpdatedAt,
+		}
+
+		cs, err := daemonLoadContainer(containerName)
+		if err == nil {
+			view.IP = cs.IP
+			view.Status = cs.Status
+		}
+
+		out = append(out, view)
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func listK8sDeploymentsForUI() ([]K8sDeploymentView, error) {
+	items, err := readJSONFilesForUI[DaemonDeploymentState]("/var/lib/minicontainer/deployments")
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]K8sDeploymentView, 0, len(items))
+	for _, d := range items {
+		out = append(out, K8sDeploymentView{
+			Name:      d.Name,
+			Replicas:  d.Replicas,
+			UpdatedAt: d.UpdatedAt,
+			CreatedAt: d.CreatedAt,
+		})
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func listK8sServicesForUI() ([]K8sServiceView, error) {
+	items, err := daemonListServices()
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]K8sServiceView, 0, len(items))
+	for _, s := range items {
+		out = append(out, K8sServiceView{
+			Name:       s.Name,
+			Deployment: s.Deployment,
+			Port:       s.Port,
+			TargetPort: s.TargetPort,
+			UpdatedAt:  s.UpdatedAt,
+			CreatedAt:  s.CreatedAt,
+		})
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func readJSONFilesForUI[T any](dir string) ([]T, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var out []T
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		var item T
+		if err := json.Unmarshal(data, &item); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+func registerK8sUIAPI(mux *http.ServeMux, serviceManager *ServiceManager) {
+	register := func(prefix string) {
+		mux.HandleFunc(prefix+"/pods", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				writeMethodNotAllowed(w, http.MethodGet)
+				return
+			}
+			items, err := listK8sPodsForUI()
+			if err != nil {
+				writeInternalError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, items)
+		})
+
+		mux.HandleFunc(prefix+"/deployments", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				items, err := listK8sDeploymentsForUI()
+				if err != nil {
+					writeInternalError(w, err)
+					return
+				}
+				writeJSON(w, http.StatusOK, items)
+
+			case http.MethodPost:
+				data, err := io.ReadAll(r.Body)
+				if err != nil {
+					writeBadRequest(w, err.Error())
+					return
+				}
+				tmp, err := os.CreateTemp("", "deployment-*.yaml")
+				if err != nil {
+					writeInternalError(w, err)
+					return
+				}
+				defer os.Remove(tmp.Name())
+				if _, err := tmp.Write(data); err != nil {
+					writeInternalError(w, err)
+					return
+				}
+				_ = tmp.Close()
+
+				if err := runMiniContainerCLI("deploy", "apply", "-f", tmp.Name()); err != nil {
+					writeBadRequest(w, err.Error())
+					return
+				}
+				if serviceManager != nil {
+					_ = serviceManager.Sync()
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+
+			default:
+				writeMethodNotAllowed(w, http.MethodGet, http.MethodPost)
+			}
+		})
+
+		mux.HandleFunc(prefix+"/deployments/", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodDelete {
+				writeMethodNotAllowed(w, http.MethodDelete)
+				return
+			}
+
+			name := filepath.Base(r.URL.Path)
+			if name == "" || name == "deployments" {
+				writeBadRequest(w, "missing deployment name")
+				return
+			}
+
+			if err := runMiniContainerCLI("deploy", "delete", name); err != nil {
+				writeBadRequest(w, err.Error())
+				return
+			}
+			if serviceManager != nil {
+				_ = serviceManager.Sync()
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		})
+
+		mux.HandleFunc(prefix+"/services", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				items, err := listK8sServicesForUI()
+				if err != nil {
+					writeInternalError(w, err)
+					return
+				}
+				writeJSON(w, http.StatusOK, items)
+
+			case http.MethodPost:
+				data, err := io.ReadAll(r.Body)
+				if err != nil {
+					writeBadRequest(w, err.Error())
+					return
+				}
+				tmp, err := os.CreateTemp("", "service-*.yaml")
+				if err != nil {
+					writeInternalError(w, err)
+					return
+				}
+				defer os.Remove(tmp.Name())
+				if _, err := tmp.Write(data); err != nil {
+					writeInternalError(w, err)
+					return
+				}
+				_ = tmp.Close()
+
+				if err := runMiniContainerCLI("service", "apply", "-f", tmp.Name()); err != nil {
+					writeBadRequest(w, err.Error())
+					return
+				}
+				if serviceManager != nil {
+					_ = serviceManager.Sync()
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+
+			default:
+				writeMethodNotAllowed(w, http.MethodGet, http.MethodPost)
+			}
+		})
+
+		mux.HandleFunc(prefix+"/services/", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodDelete {
+				writeMethodNotAllowed(w, http.MethodDelete)
+				return
+			}
+
+			name := filepath.Base(r.URL.Path)
+			if name == "" || name == "services" {
+				writeBadRequest(w, "missing service name")
+				return
+			}
+
+			if err := runMiniContainerCLI("service", "delete", name); err != nil {
+				writeBadRequest(w, err.Error())
+				return
+			}
+			if serviceManager != nil {
+				_ = serviceManager.Sync()
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		})
+
+		mux.HandleFunc(prefix+"/reconcile-all", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeMethodNotAllowed(w, http.MethodPost)
+				return
+			}
+
+			if err := runMiniContainerCLI("deploy", "reconcile-all"); err != nil {
+				writeInternalError(w, err)
+				return
+			}
+			if serviceManager != nil {
+				_ = serviceManager.Sync()
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		})
+
+		mux.HandleFunc(prefix+"/status", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				writeMethodNotAllowed(w, http.MethodGet)
+				return
+			}
+
+			writeJSON(w, http.StatusOK, K8sStatusView{
+				ReconcileLoopRunning: true,
+				ServiceLayerStatus:   "state/config works; full multi-replica proxy is future work",
+			})
+		})
+	}
+
+	register("/k8s")
+	register("/api/k8s")
 }

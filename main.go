@@ -21,6 +21,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "run error: %v\n", err)
 			os.Exit(1)
 		}
+	case "service":
+		if err := serviceCmd(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "service error: %v\n", err)
+			os.Exit(1)
+		}
 	case "child":
 		if err := child(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "child error: %v\n", err)
@@ -69,6 +74,16 @@ func main() {
 	case "image":
 		if err := imageCmd(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "image error: %v\n", err)
+			os.Exit(1)
+		}
+	case "pod":
+		if err := podCmd(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "pod error: %v\n", err)
+			os.Exit(1)
+		}
+	case "deploy":
+		if err := deployCmd(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "deploy error: %v\n", err)
 			os.Exit(1)
 		}
 	case "help", "-h", "--help":
@@ -368,5 +383,14 @@ Usage:
   minicontainer logs <id> [stdout|stderr]
   minicontainer exec <id> <command> [args...]
   minicontainer image <add|ls|inspect|rm|import|export|pull|build> ...
+  minicontainer pod apply -f <file>
+  minicontainer pod delete <name>
+  minicontainer pod get
+  minicontainer deploy apply -f <file>
+  minicontainer deploy get
+  minicontainer deploy delete <name>
+  minicontainer service apply -f <file>
+  minicontainer service get
+  minicontainer service delete <name>
 `)
 }

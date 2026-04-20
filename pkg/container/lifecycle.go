@@ -23,6 +23,8 @@ type ContainerState struct {
 	Ports     []Port   `json:"ports"`
 	Status    string   `json:"status"`
 	PID       int      `json:"pid"`
+	IP        string   `json:"ip"`
+	CIDR      string   `json:"cidr"`
 	CreatedAt string   `json:"created_at"`
 	UpdatedAt string   `json:"updated_at"`
 }
@@ -72,6 +74,8 @@ func Create(id, rootfs string, command []string, env []string, mounts []Mount, p
 		Ports:     append([]Port(nil), ports...),
 		Status:    "created",
 		PID:       0,
+		IP:        "",
+		CIDR:      "",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -97,7 +101,18 @@ func Start(id string) error {
 	if state.Status == "running" && processAlive(state.PID) {
 		return fmt.Errorf("container %q is already running with pid %d", id, state.PID)
 	}
-
+	if state.IP == "" {
+		allocatedIP, err := allocateContainerIP(containerStateRoot)
+		if err != nil {
+			return fmt.Errorf("allocate container IP: %w", err)
+		}
+		state.IP = allocatedIP
+		state.CIDR = containerCIDR(allocatedIP)
+		state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		if err := writeState(state); err != nil {
+			return fmt.Errorf("persist allocated container IP: %w", err)
+		}
+	}
 	self, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate current executable: %w", err)
@@ -135,7 +150,13 @@ func Start(id string) error {
 	cmd.Stdin = nil
 	cmd.Stdout = stdoutLog
 	cmd.Stderr = stderrLog
-	cmd.Env = append(os.Environ(), pidFileEnv+"="+pidFile)
+	cmd.Env = append(os.Environ(),
+		pidFileEnv+"="+pidFile,
+		hostVethAddrEnv+"="+defaultHostCIDR,
+		contVethAddrEnv+"="+state.CIDR,
+		contIfRenameEnv+"="+defaultContIfName,
+		defaultGatewayEnv+"="+defaultGatewayIP,
+	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
 	}
@@ -154,7 +175,7 @@ func Start(id string) error {
 	if err := waitForProcessAlive(containerPID, 500*time.Millisecond); err != nil {
 		_ = syscall.Kill(cmd.Process.Pid, syscall.SIGKILL)
 		_ = os.Remove(pidFile)
-		_ = cleanupPublishedPortRules(state.Ports)
+		_ = cleanupPublishedPortRules(state.IP, state.Ports)
 		state.Status = "created"
 		state.PID = 0
 		state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -169,7 +190,7 @@ func Start(id string) error {
 	if err := writeState(state); err != nil {
 		_ = syscall.Kill(cmd.Process.Pid, syscall.SIGKILL)
 		_ = os.Remove(pidFile)
-		_ = cleanupPublishedPortRules(state.Ports)
+		_ = cleanupPublishedPortRules(state.IP, state.Ports)
 		return err
 	}
 
@@ -255,7 +276,7 @@ func Stop(id string) error {
 	}
 
 	if state.PID <= 0 || !processAlive(state.PID) {
-		_ = cleanupPublishedPortRules(state.Ports)
+		_ = cleanupPublishedPortRules(state.IP, state.Ports)
 		state.Status = "stopped"
 		state.PID = 0
 		state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -269,7 +290,7 @@ func Stop(id string) error {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if !processAlive(state.PID) {
-			_ = cleanupPublishedPortRules(state.Ports)
+			_ = cleanupPublishedPortRules(state.IP, state.Ports)
 			state.Status = "stopped"
 			state.PID = 0
 			state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -282,7 +303,7 @@ func Stop(id string) error {
 		return fmt.Errorf("send SIGKILL: %w", err)
 	}
 
-	_ = cleanupPublishedPortRules(state.Ports)
+	_ = cleanupPublishedPortRules(state.IP, state.Ports)
 	state.Status = "stopped"
 	state.PID = 0
 	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -303,7 +324,7 @@ func Remove(id string) error {
 		return fmt.Errorf("container %q is still running", id)
 	}
 
-	_ = cleanupPublishedPortRules(state.Ports)
+	_ = cleanupPublishedPortRules(state.IP, state.Ports)
 	return os.RemoveAll(containerDir(id))
 }
 

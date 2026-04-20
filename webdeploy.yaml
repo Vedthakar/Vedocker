@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Deployment
+metadata:
+  name: webdemo
+spec:
+  replicas: 2
+  template:
+    image: python:3.12-alpine
+    command:
+      - /usr/local/bin/python3
+      - -m
+      - http.server
+      - "8080"
+      - --bind
+      - 0.0.0.0
+    ports: []
