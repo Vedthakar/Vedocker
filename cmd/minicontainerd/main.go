@@ -304,7 +304,13 @@ func handleDeployRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, status := deployRepo(strings.TrimSpace(req.RepoURL), strings.TrimSpace(req.GeminiAPIKey))
+	// Fall back to the daemon's env so URL-triggered deploys need no key in the UI.
+	geminiAPIKey := strings.TrimSpace(req.GeminiAPIKey)
+	if geminiAPIKey == "" {
+		geminiAPIKey = strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
+	}
+
+	resp, status := deployRepo(strings.TrimSpace(req.RepoURL), geminiAPIKey)
 	writeJSON(w, status, resp)
 }
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 const API_BASE = "/api";
 
@@ -86,6 +86,39 @@ function accessNote(container) {
   };
 }
 
+// Repo encoded in the page URL, so swapping github.com for the dashboard host
+// deploys it: /github.com/owner/repo, /owner/repo or ?repo=<url>.
+function repoFromLocation(location) {
+  const query = new URLSearchParams(location.search).get("repo");
+  if (query) return query.trim();
+
+  const path = decodeURIComponent(location.pathname)
+    .replace(/^\/+|\/+$/g, "")
+    .replace(/^https?:\/+/, "")
+    .replace(/^(www\.)?github\.com\//, "");
+  const match = path.match(/^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?(?:\/.*)?$/);
+  if (!match) return "";
+  return `https://github.com/${match[1]}/${match[2]}`;
+}
+
+const AUTO_DEPLOY_KEY = "vedocker.autoDeployFromURL";
+
+function readAutoDeployPref() {
+  try {
+    return localStorage.getItem(AUTO_DEPLOY_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeAutoDeployPref(on) {
+  try {
+    localStorage.setItem(AUTO_DEPLOY_KEY, on ? "1" : "0");
+  } catch {
+    // Storage blocked: the confirm prompt simply shows again next time.
+  }
+}
+
 function App() {
   const [geminiAPIKey, setGeminiAPIKey] = useState("");
   const [images, setImages] = useState([]);
@@ -106,6 +139,9 @@ function App() {
   const [repoURL, setRepoURL] = useState("");
   const [deployBusy, setDeployBusy] = useState(false);
   const [deployResult, setDeployResult] = useState(null);
+  const autoDeployStarted = useRef(false);
+  const [pendingURLDeploy, setPendingURLDeploy] = useState("");
+  const [alwaysAutoDeploy, setAlwaysAutoDeploy] = useState(false);
 
   const [newContainerId, setNewContainerId] = useState("");
   const [newContainerImage, setNewContainerImage] = useState("");
@@ -273,8 +309,11 @@ function App() {
 
   async function handleDeployRepo(event) {
     event.preventDefault();
+    await deployRepo(repoURL);
+  }
 
-    const trimmed = repoURL.trim();
+  async function deployRepo(url) {
+    const trimmed = url.trim();
     if (!trimmed) {
       setError("Repo URL is required");
       return;
@@ -312,6 +351,26 @@ function App() {
   useEffect(() => {
     loadDashboard(true);
   }, []);
+
+  useEffect(() => {
+    // StrictMode runs effects twice in dev; deploy the URL's repo only once.
+    if (autoDeployStarted.current) return;
+    const fromURL = repoFromLocation(window.location);
+    if (!fromURL) return;
+    autoDeployStarted.current = true;
+    setRepoURL(fromURL);
+    // The daemon runs repos as root, so a link from someone else must not
+    // deploy silently: confirm once unless the user opted into auto-deploy.
+    if (readAutoDeployPref()) deployRepo(fromURL);
+    else setPendingURLDeploy(fromURL);
+  }, []);
+
+  function confirmURLDeploy(alwaysAuto) {
+    if (alwaysAuto) writeAutoDeployPref(true);
+    const url = pendingURLDeploy;
+    setPendingURLDeploy("");
+    deployRepo(url);
+  }
 
   useEffect(() => {
     if (selectedContainerId) {
@@ -356,6 +415,38 @@ function App() {
             <h2>Deploy GitHub Repo</h2>
           </div>
         </div>
+
+        {pendingURLDeploy && (
+          <div className="deploy-result needs-ai url-confirm">
+            <div className="deploy-result-title">Deploy this repo from the URL?</div>
+            <div className="mono wrap-anywhere">{pendingURLDeploy}</div>
+            <label className="url-confirm-check">
+              <input
+                type="checkbox"
+                checked={alwaysAutoDeploy}
+                onChange={(e) => setAlwaysAutoDeploy(e.target.checked)}
+              />
+              Always auto-deploy from the URL on this machine
+            </label>
+            <div className="action-row">
+              <button
+                className="primary-btn"
+                type="button"
+                autoFocus
+                onClick={() => confirmURLDeploy(alwaysAutoDeploy)}
+              >
+                Deploy
+              </button>
+              <button
+                className="secondary-btn"
+                type="button"
+                onClick={() => setPendingURLDeploy("")}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
 
        <form className="deploy-form" onSubmit={handleDeployRepo}>
         <input

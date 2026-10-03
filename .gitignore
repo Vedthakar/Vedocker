@@ -1,0 +1,17 @@
+# Build outputs
+/minicontainer
+/minicontainerd
+minicontainer-ui/dist/
+
+# Dependencies
+node_modules/
+
+# Secrets — never commit API keys
+.env
+.env.*
+
+# Local launch-video workspace
+brag-output/
+
+.DS_Store
+*.bak

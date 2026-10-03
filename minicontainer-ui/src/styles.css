@@ -253,6 +253,28 @@ a {
   background: linear-gradient(180deg, rgba(255, 59, 95, 0.08), rgba(255, 59, 95, 0.03));
 }
 
+.url-confirm {
+  margin: 0 0 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.url-confirm .deploy-result-title {
+  margin-bottom: 0;
+}
+
+.url-confirm-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.url-confirm-check input {
+  width: auto;
+}
+
 .deploy-result-title {
   font-weight: 700;
   margin-bottom: 12px;
