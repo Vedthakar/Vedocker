@@ -20,6 +20,7 @@
 <img src="assets/demo.gif" alt="Change a GitHub URL and Vedocker deploys the repo" width="100%" />
 
 **[▶ Watch the 20-second launch video (with sound)](assets/vedocker-launch.mp4)**
+
 [How it works, layer by layer: I built my own Docker and Kubernetes from scratch](https://towardsaws.com/i-built-my-own-docker-and-kubernetes-system-from-scratch-and-you-can-too-759ffabe9993)
 
 [Quickstart](#quickstart) · [The URL trick](#the-url-trick) · [Use cases](#what-you-can-do-with-it) · [How it works](#how-it-works) · [CLI reference](#cli-reference)
