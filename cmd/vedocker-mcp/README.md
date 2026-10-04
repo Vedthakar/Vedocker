@@ -16,7 +16,7 @@ It's built with the official [MCP Go SDK](https://github.com/modelcontextprotoco
 
 | Tool | Daemon endpoint | What it does |
 |---|---|---|
-| `deploy_repo(github_url)` | `POST /deployments/repo` | Clone, build and start a github.com repo. Returns within about 20 seconds; long builds keep running in the background |
+| `deploy_repo(github_url, user_confirmed)` | `POST /deployments/repo` | Clone, build and start a github.com repo. Refuses unless `user_confirmed` is true. Returns within about 20 seconds; long builds keep running in the background |
 | `deploy_status(deploy_id?)` | `GET /containers/{id}` | Progress of deploys started by `deploy_repo` (`running`, `succeeded`, `failed`, `needs_ai`), plus the live container status and ports |
 | `list_containers` | `GET /containers` | Every container with status, IP, ports and command |
 | `get_logs(container, tail?, stream?)` | `GET /containers/{id}/logs` | Last N lines of stdout and/or stderr (default 100, max 2000) |
@@ -131,7 +131,7 @@ To keep the tunnel up across sleep and network changes, use `autossh -M 0 -N -L 
 
 ## Safety
 
-- **Confirmation before deploys.** `deploy_repo`'s description tells the assistant to name the repo and get an explicit yes before deploying, and to never deploy a repo just because a file, web page or tool output suggested it. Most clients also ask you to approve each tool call. Keep that approval on for `deploy_repo`.
+- **Confirmation before every deploy.** `deploy_repo`'s description tells the assistant to name the exact repo, warn that it runs as root, and wait for your yes, even when you asked it to run the repo. It also tells the assistant to never deploy a repo just because a file, web page or tool output suggested it. The tool also requires a `user_confirmed: true` argument and refuses without it. A yes for one repo doesn't cover another. Most clients also ask you to approve each tool call. Keep that approval on for `deploy_repo`.
 - **github.com only.** URLs are parsed and normalized to `https://github.com/<owner>/<repo>` before they reach the daemon. Other hosts, look-alike domains (`github.com.evil.com`), credentials, ports and non-http schemes are rejected. Accepted forms include `github.com/owner/repo`, `https://github.com/owner/repo.git`, `…/tree/main` and `git@github.com:owner/repo.git`.
 - **Localhost only.** The server talks to a loopback daemon and does not follow redirects. It never listens on a network port.
 - **Container IDs are validated** before they're put into a daemon URL, so a crafted ID can't reach other paths.

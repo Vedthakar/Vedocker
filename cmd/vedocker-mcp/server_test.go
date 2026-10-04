@@ -216,7 +216,7 @@ func TestListTools(t *testing.T) {
 		if len(tool.Description) < 40 {
 			t.Errorf("tool %q needs a fuller description, got %q", tool.Name, tool.Description)
 		}
-		if tool.Name == "deploy_repo" && !strings.Contains(tool.Description, "explicit yes") {
+		if tool.Name == "deploy_repo" && !strings.Contains(tool.Description, "ALWAYS confirm first") {
 			t.Errorf("deploy_repo description must tell the AI to confirm with the user")
 		}
 	}
@@ -231,7 +231,7 @@ func TestDeployRepoSucceeds(t *testing.T) {
 	m, srv := newMockDaemon(t)
 	s := connect(t, srv.URL, 5*time.Second)
 
-	res := call(t, s, "deploy_repo", map[string]any{"github_url": "github.com/owner/app/tree/main"})
+	res := call(t, s, "deploy_repo", map[string]any{"github_url": "github.com/owner/app/tree/main", "user_confirmed": true})
 	if res.IsError {
 		t.Fatalf("deploy_repo failed: %s", text(res))
 	}
@@ -247,12 +247,30 @@ func TestDeployRepoSucceeds(t *testing.T) {
 	}
 }
 
+func TestDeployRepoRequiresConfirmation(t *testing.T) {
+	m, srv := newMockDaemon(t)
+	s := connect(t, srv.URL, time.Second)
+
+	for _, args := range []map[string]any{
+		{"github_url": "https://github.com/owner/app"},
+		{"github_url": "https://github.com/owner/app", "user_confirmed": false},
+	} {
+		res := call(t, s, "deploy_repo", args)
+		if !res.IsError || !(strings.Contains(text(res), "ask the user first") || strings.Contains(text(res), "user_confirmed")) {
+			t.Fatalf("deploy_repo(%v) should refuse without confirmation, got %s", args, text(res))
+		}
+	}
+	if len(m.deployReqs) != 0 {
+		t.Fatalf("daemon must not be called without confirmation, got %v", m.deployReqs)
+	}
+}
+
 func TestDeployRepoRejectsNonGitHub(t *testing.T) {
 	m, srv := newMockDaemon(t)
 	s := connect(t, srv.URL, time.Second)
 
 	for _, u := range []string{"https://gitlab.com/owner/repo", "https://github.com.evil.com/a/b", "owner/repo"} {
-		res := call(t, s, "deploy_repo", map[string]any{"github_url": u})
+		res := call(t, s, "deploy_repo", map[string]any{"github_url": u, "user_confirmed": true})
 		if !res.IsError {
 			t.Errorf("deploy_repo(%q) should fail", u)
 		}
@@ -267,14 +285,14 @@ func TestDeployRepoAsyncAndStatus(t *testing.T) {
 	m.release = make(chan struct{})
 	s := connect(t, srv.URL, 50*time.Millisecond)
 
-	res := call(t, s, "deploy_repo", map[string]any{"github_url": "https://github.com/owner/slow"})
+	res := call(t, s, "deploy_repo", map[string]any{"github_url": "https://github.com/owner/slow", "user_confirmed": true})
 	st := decode[deployStatus](t, res)
 	if res.IsError || st.State != deployRunning || st.DeployID == "" {
 		t.Fatalf("expected a running deploy, got %+v (%s)", st, text(res))
 	}
 
 	// A second call for the same repo while it builds reuses the deploy.
-	again := decode[deployStatus](t, call(t, s, "deploy_repo", map[string]any{"github_url": "https://github.com/owner/slow.git"}))
+	again := decode[deployStatus](t, call(t, s, "deploy_repo", map[string]any{"github_url": "https://github.com/owner/slow.git", "user_confirmed": true}))
 	if again.DeployID != st.DeployID {
 		t.Fatalf("expected the in-flight deploy %q to be reused, got %q", st.DeployID, again.DeployID)
 	}
@@ -325,12 +343,12 @@ func TestDeployRepoNeedsAIAndFailure(t *testing.T) {
 	_, srv := newMockDaemon(t)
 	s := connect(t, srv.URL, 5*time.Second)
 
-	res := call(t, s, "deploy_repo", map[string]any{"github_url": "https://github.com/owner/nodocker"})
+	res := call(t, s, "deploy_repo", map[string]any{"github_url": "https://github.com/owner/nodocker", "user_confirmed": true})
 	if !res.IsError || !strings.Contains(text(res), "GEMINI_API_KEY") {
 		t.Fatalf("expected needs_ai guidance, got %s", text(res))
 	}
 
-	res = call(t, s, "deploy_repo", map[string]any{"github_url": "https://github.com/owner/broken"})
+	res = call(t, s, "deploy_repo", map[string]any{"github_url": "https://github.com/owner/broken", "user_confirmed": true})
 	if !res.IsError || !strings.Contains(text(res), "RUN exited 1") {
 		t.Fatalf("expected the daemon's build error, got %s", text(res))
 	}
