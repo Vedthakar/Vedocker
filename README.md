@@ -23,7 +23,7 @@
 
 [How it works, layer by layer: I built my own Docker and Kubernetes from scratch](https://towardsaws.com/i-built-my-own-docker-and-kubernetes-system-from-scratch-and-you-can-too-759ffabe9993)
 
-[Quickstart](#quickstart) · [The URL trick](#the-url-trick) · [Use cases](#what-you-can-do-with-it) · [How it works](#how-it-works) · [CLI reference](#cli-reference)
+[Quickstart](#quickstart) · [The URL trick](#the-url-trick) · [AI assistants (MCP)](#run-repos-from-your-ai-assistant-mcp) · [Browser extension](#run-with-vedocker-button-browser-extension) · [Use cases](#what-you-can-do-with-it) · [How it works](#how-it-works) · [CLI reference](#cli-reference)
 
 </div>
 
@@ -64,6 +64,52 @@ These forms all work:
 
 ---
 
+## Run repos from your AI assistant (MCP)
+
+<!-- GIF placeholder: save the recording as assets/mcp-demo.gif, then replace this comment with:
+<img src="assets/mcp-demo.gif" alt="Asking Claude Code to run a GitHub repo with Vedocker" width="100%" />
+-->
+
+Tell Claude Code, Cursor or Claude Desktop to *"run github.com/owner/repo"* and it deploys the repo on your Vedocker daemon, waits for the build, and reads you the logs.
+
+`vedocker-mcp` is an MCP server built with the official Go SDK. It wraps the daemon's existing API with seven tools: `deploy_repo`, `deploy_status`, `list_containers`, `get_logs`, `stop_container`, `remove_container` and `list_images`.
+
+**Quickstart (Claude Code):**
+
+```bash
+make mcp
+claude mcp add --transport stdio --scope user vedocker -- "$(pwd)/vedocker-mcp"
+```
+
+Then ask: `run github.com/owner/repo`.
+
+Safety: it only accepts github.com URLs, and the assistant is told to confirm with you before every deploy, because the daemon runs repos as root. It only talks to a daemon on `127.0.0.1`. For a remote Linux box, use an SSH tunnel instead of exposing the daemon.
+
+**[Full setup for Claude Code, Cursor and Claude Desktop, plus SSH tunnel instructions →](cmd/vedocker-mcp/README.md)**
+
+---
+
+## "Run with Vedocker" button (browser extension)
+
+<!-- GIF placeholder: save the recording as assets/extension-demo.gif, then replace this comment with:
+<img src="assets/extension-demo.gif" alt="Clicking Run with Vedocker on a GitHub repo page" width="100%" />
+-->
+
+The URL trick as a button. The extension adds **Run with Vedocker** next to GitHub's green **Code** button, and clicking it opens the repo in your dashboard.
+
+It works in Chrome and Firefox (Manifest V3). It only asks for access to github.com and storage for your dashboard URL. No analytics, no tracking, no network requests.
+
+**Quickstart (install from source):**
+
+1. Chrome: open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick the `extension/` folder.
+   Firefox: open `about:debugging#/runtime/this-firefox`, click **Load Temporary Add-on…** and pick `extension/manifest.json`.
+2. Open any GitHub repo and click **Run with Vedocker**.
+3. Dashboard not on `http://localhost:5173`? Click the extension's toolbar icon to change the URL.
+
+**[Extension docs →](extension/README.md)**
+
+---
+
 ## Quickstart
 
 Requires **Linux** (namespaces, cgroups and iptables), **root**, **Go 1.25+**, **Node 18+** and **git**.
@@ -72,7 +118,7 @@ Requires **Linux** (namespaces, cgroups and iptables), **root**, **Go 1.25+**, *
 git clone https://github.com/Vedthakar/Vedocker.git
 cd Vedocker
 
-# 1. Build the CLI and the daemon
+# 1. Build the CLI, the daemon and the MCP server
 make build
 
 # 2. Start the daemon (the Gemini key is optional and only used when a repo has no Dockerfile)
@@ -92,7 +138,8 @@ On ARM64 you can seed a local Alpine base image with `sudo ./scripts/bootstrap.s
 
 | You want to… | Do this |
 |---|---|
-| **Run a repo you just found** | Open `localhost:5173/github.com/owner/repo` |
+| **Run a repo you just found** | Open `localhost:5173/github.com/owner/repo`, or click **Run with Vedocker** on its GitHub page |
+| **Have your AI assistant run it** | Ask Claude Code, Cursor or Claude Desktop to *"run github.com/owner/repo"* with [`vedocker-mcp`](cmd/vedocker-mcp/README.md) |
 | **Run a repo that has no Dockerfile** | Same thing. Gemini reads the repo, picks the stack, and writes a Dockerfile, which Vedocker validates before building |
 | **Try a project before reading its setup docs** | Paste the link and watch the build and runtime logs in the dashboard |
 | **Build an image from your own Dockerfile** | `sudo ./minicontainer image build -t my-app:v1 -f Dockerfile .` |
@@ -111,6 +158,8 @@ On ARM64 you can seed a local Alpine base image with `sudo ./scripts/bootstrap.s
 - **Networking.** Each container gets its own network namespace and IP, and ports are published with iptables NAT.
 - **Kubernetes-style orchestration.** Pods, Deployments, scaling, and a background reconcile loop that self-heals.
 - **Live dashboard.** Docker and Kubernetes views, container controls, and stdout/stderr logs.
+- **MCP server.** AI assistants can deploy repos, read logs and manage containers through `vedocker-mcp`.
+- **Browser extension.** A **Run with Vedocker** button on every GitHub repo page, for Chrome and Firefox.
 
 ---
 
@@ -149,6 +198,8 @@ GitHub URL (pasted, or read from the page URL)
 Vedocker/
 ├── main.go                 CLI entry point (minicontainer)
 ├── cmd/minicontainerd/     daemon + HTTP API
+├── cmd/vedocker-mcp/       MCP server for AI assistants
+├── extension/              "Run with Vedocker" browser extension (MV3)
 ├── minicontainer-ui/       React + Vite dashboard
 ├── pkg/
 │   ├── container/          runtime, build engine, rootfs, exec, networking glue
@@ -209,7 +260,7 @@ spec:
 
 ## Status
 
-Working today: the runtime, image store, build engine, GitHub and AI deploy, URL-triggered deploys, the dashboard, pods, deployments, scaling, and self-healing reconcile.
+Working today: the runtime, image store, build engine, GitHub and AI deploy, URL-triggered deploys, the dashboard, the MCP server, the browser extension, pods, deployments, scaling, and self-healing reconcile.
 
 Not done yet: multi-replica Service load balancing, which needs a redesign of the runtime networking model.
 

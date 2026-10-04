@@ -1,6 +1,8 @@
 # Build outputs
 /minicontainer
 /minicontainerd
+/vedocker-mcp
+extension/dist/
 minicontainer-ui/dist/
 
 # Dependencies
