@@ -26,6 +26,7 @@ const (
 	contIfRenameEnv   = "MINICONTAINER_CONT_IF_RENAME"
 	defaultGatewayEnv = "MINICONTAINER_DEFAULT_GW"
 	pidFileEnv        = "MINICONTAINER_PIDFILE"
+	workdirEnv        = "MINICONTAINER_WORKDIR"
 
 	defaultHostCIDR     = "10.200.1.1/24"
 	defaultGatewayIP    = "10.200.1.1"

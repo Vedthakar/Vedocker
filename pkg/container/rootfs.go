@@ -32,6 +32,13 @@ func setupRootfs(rootfs string, mounts []Mount) error {
 		return fmt.Errorf("chdir to new root: %w", err)
 	}
 
+	// Start in the image's WORKDIR so relative CMDs work, as in Docker.
+	if wd := os.Getenv(workdirEnv); wd != "" && wd != "/" {
+		if err := os.Chdir(wd); err != nil {
+			return fmt.Errorf("chdir to WORKDIR %s: %w", wd, err)
+		}
+	}
+
 	return nil
 }
 

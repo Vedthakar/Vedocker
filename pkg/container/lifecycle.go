@@ -21,6 +21,7 @@ type ContainerState struct {
 	Env       []string `json:"env"`
 	Mounts    []Mount  `json:"mounts"`
 	Ports     []Port   `json:"ports"`
+	Workdir   string   `json:"workdir,omitempty"`
 	Status    string   `json:"status"`
 	PID       int      `json:"pid"`
 	IP        string   `json:"ip"`
@@ -30,6 +31,12 @@ type ContainerState struct {
 }
 
 func Create(id, rootfs string, command []string, env []string, mounts []Mount, ports []Port) error {
+	return CreateWithWorkdir(id, rootfs, command, env, mounts, ports, "")
+}
+
+// CreateWithWorkdir is Create plus the directory the command starts in,
+// usually the image's WORKDIR.
+func CreateWithWorkdir(id, rootfs string, command []string, env []string, mounts []Mount, ports []Port, workdir string) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("this command must be run as root")
 	}
@@ -72,6 +79,7 @@ func Create(id, rootfs string, command []string, env []string, mounts []Mount, p
 		Env:       append([]string(nil), env...),
 		Mounts:    append([]Mount(nil), mounts...),
 		Ports:     append([]Port(nil), ports...),
+		Workdir:   workdir,
 		Status:    "created",
 		PID:       0,
 		IP:        "",
@@ -157,6 +165,9 @@ func Start(id string) error {
 		contIfRenameEnv+"="+defaultContIfName,
 		defaultGatewayEnv+"="+defaultGatewayIP,
 	)
+	if state.Workdir != "" {
+		cmd.Env = append(cmd.Env, workdirEnv+"="+state.Workdir)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
 	}

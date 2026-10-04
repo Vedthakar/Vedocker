@@ -157,7 +157,11 @@ func BuildImage(ref, dockerfilePath, contextDir string) error {
 		return fmt.Errorf("activate built image rootfs: %w", err)
 	}
 
-	return writeImageMetadataWithConfig(name+":"+tag, finalDir, "build", state.Entrypoint, state.Cmd)
+	workingDir := state.Workdir
+	if workingDir == "/" {
+		workingDir = ""
+	}
+	return writeImageMetadataWithConfig(name+":"+tag, finalDir, "build", state.Entrypoint, state.Cmd, workingDir)
 }
 
 func parseDockerfile(path string) ([]dockerfileInstruction, error) {
@@ -375,10 +379,24 @@ func applyCopyInstruction(contextDir, rootfs, workdir, args string) error {
 		return copyTree(absSrc, destPath)
 	}
 
+	// Like Docker: a destination ending in "/", ".", or naming an existing
+	// directory receives the file inside it (COPY .npmrc . / COPY app.py /opt/).
+	if copyDestIsDir(dstArg, destPath) {
+		destPath = filepath.Join(destPath, filepath.Base(absSrc))
+	}
+
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return fmt.Errorf("create COPY parent dir: %w", err)
 	}
 	return copyFile(absSrc, destPath, srcInfo.Mode())
+}
+
+func copyDestIsDir(dstArg, destPath string) bool {
+	if strings.HasSuffix(dstArg, "/") || dstArg == "." || strings.HasSuffix(dstArg, "/.") {
+		return true
+	}
+	info, err := os.Stat(destPath)
+	return err == nil && info.IsDir()
 }
 
 func applyRunInstruction(rootfs, workdir string, env map[string]string, cmd string) error {
@@ -386,6 +404,12 @@ func applyRunInstruction(rootfs, workdir string, env map[string]string, cmd stri
 	if strings.TrimSpace(workdir) != "" && workdir != "/" {
 		script = "cd " + shellQuote(workdir) + " && " + cmd
 	}
+
+	restore, err := useHostResolvConf(rootfs)
+	if err != nil {
+		return err
+	}
+	defer restore()
 
 	command := exec.Command("chroot", rootfs, "/bin/sh", "-c", script)
 	command.Stdout = os.Stdout
@@ -397,6 +421,48 @@ func applyRunInstruction(rootfs, workdir string, env map[string]string, cmd stri
 		return fmt.Errorf("RUN failed: %w", err)
 	}
 	return nil
+}
+
+// useHostResolvConf gives RUN steps working DNS, as Docker does: images ship
+// without a usable /etc/resolv.conf, so the host's is put in place for the
+// step and the image's original (file, symlink or nothing) is put back after,
+// so it never ends up in the built image.
+func useHostResolvConf(rootfs string) (func(), error) {
+	hostConf, err := os.ReadFile("/etc/resolv.conf")
+	if err != nil {
+		return func() {}, nil
+	}
+
+	etc := filepath.Join(rootfs, "etc")
+	if err := os.MkdirAll(etc, 0o755); err != nil {
+		return nil, fmt.Errorf("create /etc in build rootfs: %w", err)
+	}
+	target := filepath.Join(etc, "resolv.conf")
+
+	// Move the original aside without following symlinks, so writing the
+	// host copy can never land outside the rootfs.
+	backup := target + ".vedocker-orig"
+	hadOriginal := false
+	if _, err := os.Lstat(target); err == nil {
+		if err := os.Rename(target, backup); err != nil {
+			return nil, fmt.Errorf("stash image resolv.conf: %w", err)
+		}
+		hadOriginal = true
+	}
+
+	if err := os.WriteFile(target, hostConf, 0o644); err != nil {
+		if hadOriginal {
+			_ = os.Rename(backup, target)
+		}
+		return nil, fmt.Errorf("write build resolv.conf: %w", err)
+	}
+
+	return func() {
+		_ = os.Remove(target)
+		if hadOriginal {
+			_ = os.Rename(backup, target)
+		}
+	}, nil
 }
 
 func parseCommandInstruction(args string) ([]string, error) {

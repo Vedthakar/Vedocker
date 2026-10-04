@@ -33,6 +33,7 @@ type Image struct {
 	CreatedAt  string   `json:"created_at"`
 	Entrypoint []string `json:"entrypoint,omitempty"`
 	Cmd        []string `json:"cmd,omitempty"`
+	WorkingDir string   `json:"working_dir,omitempty"`
 }
 
 type registryDescriptor struct {
@@ -757,10 +758,10 @@ func unpackLayerTar(r io.Reader, dest string) error {
 }
 
 func writeImageMetadata(ref, rootfs, source string) error {
-	return writeImageMetadataWithConfig(ref, rootfs, source, nil, nil)
+	return writeImageMetadataWithConfig(ref, rootfs, source, nil, nil, "")
 }
 
-func writeImageMetadataWithConfig(ref, rootfs, source string, entrypoint, cmd []string) error {
+func writeImageMetadataWithConfig(ref, rootfs, source string, entrypoint, cmd []string, workingDir string) error {
 	name, tag, err := ParseImageRef(ref)
 	if err != nil {
 		return err
@@ -792,6 +793,7 @@ func writeImageMetadataWithConfig(ref, rootfs, source string, entrypoint, cmd []
 		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
 		Entrypoint: copyStringSlice(entrypoint),
 		Cmd:        copyStringSlice(cmd),
+		WorkingDir: workingDir,
 	}
 
 	data, err := json.MarshalIndent(image, "", "  ")

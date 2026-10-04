@@ -496,7 +496,7 @@ func deployRepo(repoURL, geminiAPIKey string) (deployRepoResponse, int) {
 		}, http.StatusInternalServerError
 	}
 
-	if err := container.Create(containerID, rootfs, startupCommand, nil, nil, ports); err != nil {
+	if err := container.CreateWithWorkdir(containerID, rootfs, startupCommand, nil, nil, ports, builtImage.WorkingDir); err != nil {
 		return deployRepoResponse{
 			OK:             false,
 			RepoURL:        normalizedURL,
