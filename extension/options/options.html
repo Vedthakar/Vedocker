@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Run with Vedocker settings</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <img src="../icons/icon-48.png" alt="" width="32" height="32" />
+        <h1>Run with Vedocker</h1>
+      </header>
+
+      <form id="form" novalidate>
+        <label for="dashboard-url">Dashboard URL</label>
+        <input id="dashboard-url" name="dashboardURL" type="url" placeholder="http://localhost:5173" autocomplete="off" spellcheck="false" required />
+        <p class="hint">
+          Where your Vedocker dashboard runs. The button opens
+          <code id="example">http://localhost:5173/github.com/owner/repo</code>.
+        </p>
+
+        <div class="actions">
+          <button type="submit" class="primary">Save</button>
+          <button type="button" id="reset">Reset to default</button>
+        </div>
+        <p id="status" role="status" aria-live="polite"></p>
+      </form>
+
+      <footer>
+        No analytics, no tracking. This extension only stores your dashboard URL.
+        <a href="https://github.com/Vedthakar/Vedocker" target="_blank" rel="noopener noreferrer">Source on GitHub</a>
+      </footer>
+    </main>
+    <script src="../src/repo.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>

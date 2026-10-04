@@ -1,0 +1,45 @@
+/* Matches GitHub's default Primer button, with a Vedocker accent on the icon.
+   Primer variables keep it right in light, dark and high-contrast themes. */
+.vedocker-run-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--control-medium-size, 32px);
+  padding: 0 12px;
+  border: 1px solid var(--button-default-borderColor-rest, rgba(31, 35, 40, 0.15));
+  border-radius: var(--borderRadius-medium, 6px);
+  background: var(--button-default-bgColor-rest, #f6f8fa);
+  box-shadow: var(--button-default-shadow-resting, none);
+  color: var(--button-default-fgColor-rest, #24292f);
+  font-size: 14px;
+  font-weight: var(--base-text-weight-medium, 500);
+  line-height: 20px;
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.vedocker-run-button:hover {
+  background: var(--button-default-bgColor-hover, #eaeef2);
+  border-color: var(--button-default-borderColor-hover, rgba(31, 35, 40, 0.15));
+  color: var(--button-default-fgColor-rest, #24292f);
+  text-decoration: none;
+}
+
+.vedocker-run-button:focus-visible {
+  outline: 2px solid var(--focus-outlineColor, #0969da);
+  outline-offset: -2px;
+}
+
+.vedocker-run-button svg {
+  color: #c026d3;
+  flex-shrink: 0;
+}
+
+/* Icon only when the file toolbar is tight, so GitHub's branch picker keeps its room. */
+@media (max-width: 1199px) {
+  .vedocker-run-button span {
+    display: none;
+  }
+}
